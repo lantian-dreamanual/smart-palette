@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Palette 演示</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --card: #ffffff;
+      --accent: #0f9667;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 48px 24px;
+    }
+    h1 { margin: 0 0 8px; font-size: 32px; }
+    .subtitle { color: var(--muted); margin: 0 0 32px; }
+    .card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      margin-bottom: 24px;
+    }
+    .input-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      flex: 1;
+      min-width: 200px;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 16px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    input[type="color"] {
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      background: none;
+    }
+    button {
+      padding: 12px 20px;
+      border: none;
+      border-radius: 10px;
+      background: var(--text);
+      color: white;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.9; }
+    .palette {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .swatch {
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .swatch-color {
+      height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 600;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    }
+    .swatch-info {
+      padding: 10px 12px;
+      background: white;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    .swatch-info .step { color: var(--muted); margin-bottom: 2px; }
+    .swatch-info .hex { font-weight: 600; }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .meta-item {
+      padding: 16px;
+      background: #f8fafc;
+      border-radius: 12px;
+    }
+    .meta-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .meta-value { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 18px; font-weight: 600; }
+    .highlight { box-shadow: 0 0 0 3px var(--accent); }
+    .error { color: #ef4444; margin-top: 8px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Smart Palette</h1>
+    <p class="subtitle">输入任意颜色，生成基于 OKLCH 和 Tailwind v4 结构的 11 阶色板</p>
+
+    <div class="card">
+      <div class="input-row">
+        <input type="color" id="colorPicker" value="#EAB308" />
+        <input type="text" id="hexInput" value="#EAB308" placeholder="#RRGGBB" />
+        <button id="randomBtn">随机颜色</button>
+      </div>
+      <div id="error" class="error"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin: 0 0 16px;">生成色板</h3>
+      <div id="palette" class="palette"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin: 0 0 16px;">分析结果</h3>
+      <div class="meta" id="meta"></div>
+    </div>
+  </div>
+
+  <script src="smart-palette.js"></script>
+  <script>
+    (function () {
+      const picker = document.getElementById('colorPicker');
+      const input = document.getElementById('hexInput');
+      const randomBtn = document.getElementById('randomBtn');
+      const paletteEl = document.getElementById('palette');
+      const metaEl = document.getElementById('meta');
+      const errorEl = document.getElementById('error');
+
+      const steps = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+
+      function isLight(hex) {
+        const rgb = SmartPalette.hexToRgb(hex);
+        const y = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+        return y > 128;
+      }
+
+      function render(hex) {
+        errorEl.textContent = '';
+
+        if (!/^#([0-9A-Fa-f]{3}){1,2}$/.test(hex)) {
+          errorEl.textContent = '请输入有效的 HEX 颜色，例如 #EAB308';
+          return;
+        }
+
+        const result = SmartPalette.smartMap(hex);
+        const palette = result.palette;
+
+        paletteEl.innerHTML = '';
+        steps.forEach(function (step) {
+          const color = palette[step];
+          const swatch = document.createElement('div');
+          swatch.className = 'swatch';
+          if (step === result.bestStep) swatch.classList.add('highlight');
+
+          swatch.innerHTML =
+            '<div class="swatch-color" style="background:' + color + ';color:' + (isLight(color) ? '#000' : '#fff') + '">' +
+            (step === result.bestStep ? '锚点' : '') +
+            '</div>' +
+            '<div class="swatch-info">' +
+            '<div class="step">' + step + '</div>' +
+            '<div class="hex">' + color.toUpperCase() + '</div>' +
+            '</div>';
+
+          paletteEl.appendChild(swatch);
+        });
+
+        metaEl.innerHTML =
+          '<div class="meta-item"><div class="meta-label">bestStep</div><div class="meta-value">' + result.bestStep + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">isExact</div><div class="meta-value">' + (result.isExact ? '是' : '否') + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">OKLCH L</div><div class="meta-value">' + result.originalL.toFixed(3) + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">OKLCH C</div><div class="meta-value">' + result.originalC.toFixed(3) + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">OKLCH H</div><div class="meta-value">' + result.originalH.toFixed(1) + '°</div></div>' +
+          '<div class="meta-item"><div class="meta-label">校正后 HEX</div><div class="meta-value">' + result.adjustedHex.toUpperCase() + '</div></div>';
+      }
+
+      picker.addEventListener('input', function () {
+        input.value = picker.value;
+        render(picker.value);
+      });
+
+      input.addEventListener('input', function () {
+        if (/^#([0-9A-Fa-f]{3}){1,2}$/.test(input.value)) {
+          picker.value = input.value;
+          render(input.value);
+        }
+      });
+
+      randomBtn.addEventListener('click', function () {
+        const r = Math.floor(Math.random() * 256);
+        const g = Math.floor(Math.random() * 256);
+        const b = Math.floor(Math.random() * 256);
+        const hex = '#' + [r, g, b].map(function (x) { return x.toString(16).padStart(2, '0'); }).join('');
+        input.value = hex;
+        picker.value = hex;
+        render(hex);
+      });
+
+      render('#EAB308');
+    })();
+  </script>
+</body>
+</html>
