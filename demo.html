@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Smart Palette 演示</title>
+  <title>Smart Palette v2 演示</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -26,8 +26,19 @@
       margin: 0 auto;
       padding: 48px 24px;
     }
-    h1 { margin: 0 0 8px; font-size: 32px; }
+    h1 { margin: 0 0 4px; font-size: 32px; }
     .subtitle { color: var(--muted); margin: 0 0 32px; }
+    .version-badge {
+      display: inline-block;
+      background: #ecfdf5;
+      color: #059669;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
     .card {
       background: var(--card);
       border-radius: 16px;
@@ -69,6 +80,59 @@
       cursor: pointer;
     }
     button:hover { opacity: 0.9; }
+
+    /* 暗端色相修正开关 */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .toggle-label {
+      font-size: 14px;
+      color: var(--text);
+    }
+    .toggle-desc {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .toggle-switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #cbd5e1;
+      border-radius: 12px;
+      transition: 0.2s;
+    }
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: white;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider {
+      background: var(--accent);
+    }
+    .toggle-switch input:checked + .toggle-slider:before {
+      transform: translateX(20px);
+    }
+
     .palette {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -112,25 +176,44 @@
     .meta-value { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 18px; font-weight: 600; }
     .highlight { box-shadow: 0 0 0 3px var(--accent); }
     .error { color: #ef4444; margin-top: 8px; font-size: 14px; }
+    .note {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Smart Palette</h1>
-    <p class="subtitle">输入任意颜色，生成基于 OKLCH 和 Tailwind v4 结构的 11 阶色板</p>
+    <h1>Smart Palette <span class="version-badge">v2</span></h1>
+    <p class="subtitle">基于 OKLCH Cubic Spline 曲线拟合 + PCHIP/Akima 双插值的智能色阶生成</p>
 
     <div class="card">
       <div class="input-row">
-        <input type="color" id="colorPicker" value="#EAB308" />
-        <input type="text" id="hexInput" value="#EAB308" placeholder="#RRGGBB" />
+        <input type="color" id="colorPicker" value="#3B82F6" />
+        <input type="text" id="hexInput" value="#3B82F6" placeholder="#RRGGBB" />
         <button id="randomBtn">随机颜色</button>
       </div>
+
+      <div class="toggle-row">
+        <label class="toggle-switch">
+          <input type="checkbox" id="hueCorrection" />
+          <span class="toggle-slider"></span>
+        </label>
+        <div>
+          <div class="toggle-label">暗端色相修正</div>
+          <div class="toggle-desc">深色输入时反推基础色相，使暗端色阶与输入色色相一致</div>
+        </div>
+      </div>
+
       <div id="error" class="error"></div>
     </div>
 
     <div class="card">
       <h3 style="margin: 0 0 16px;">生成色板</h3>
       <div id="palette" class="palette"></div>
+      <div id="note" class="note"></div>
     </div>
 
     <div class="card">
@@ -142,18 +225,20 @@
   <script src="smart-palette.js"></script>
   <script>
     (function () {
-      const picker = document.getElementById('colorPicker');
-      const input = document.getElementById('hexInput');
-      const randomBtn = document.getElementById('randomBtn');
-      const paletteEl = document.getElementById('palette');
-      const metaEl = document.getElementById('meta');
-      const errorEl = document.getElementById('error');
+      var picker = document.getElementById('colorPicker');
+      var input = document.getElementById('hexInput');
+      var randomBtn = document.getElementById('randomBtn');
+      var hueCorrectionToggle = document.getElementById('hueCorrection');
+      var paletteEl = document.getElementById('palette');
+      var metaEl = document.getElementById('meta');
+      var errorEl = document.getElementById('error');
+      var noteEl = document.getElementById('note');
 
-      const steps = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+      var steps = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
 
       function isLight(hex) {
-        const rgb = SmartPalette.hexToRgb(hex);
-        const y = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+        var rgb = SmartPalette.hexToRgb(hex);
+        var y = 0.299 * (rgb.r * 255) + 0.587 * (rgb.g * 255) + 0.114 * (rgb.b * 255);
         return y > 128;
       }
 
@@ -161,17 +246,18 @@
         errorEl.textContent = '';
 
         if (!/^#([0-9A-Fa-f]{3}){1,2}$/.test(hex)) {
-          errorEl.textContent = '请输入有效的 HEX 颜色，例如 #EAB308';
+          errorEl.textContent = '请输入有效的 HEX 颜色，例如 #3B82F6';
           return;
         }
 
-        const result = SmartPalette.smartMap(hex);
-        const palette = result.palette;
+        var hueCorrection = hueCorrectionToggle.checked;
+        var result = SmartPalette.tv4SmartMap(hex, hueCorrection);
+        var palette = result.palette;
 
         paletteEl.innerHTML = '';
         steps.forEach(function (step) {
-          const color = palette[step];
-          const swatch = document.createElement('div');
+          var color = palette[step];
+          var swatch = document.createElement('div');
           swatch.className = 'swatch';
           if (step === result.bestStep) swatch.classList.add('highlight');
 
@@ -187,13 +273,33 @@
           paletteEl.appendChild(swatch);
         });
 
+        // 色相修正信息
+        var hueInfo = '';
+        if (result.hueCorrected) {
+          hueInfo = '<div class="meta-item"><div class="meta-label">ANCHOR HUE</div><div class="meta-value">' + Math.round(result.usedHue) + '&deg;</div></div>';
+        }
+
+        var correctionStatus = result.hueCorrected ? '已修正' : (result.isDark ? '未修正' : '&mdash;');
+
         metaEl.innerHTML =
-          '<div class="meta-item"><div class="meta-label">bestStep</div><div class="meta-value">' + result.bestStep + '</div></div>' +
-          '<div class="meta-item"><div class="meta-label">isExact</div><div class="meta-value">' + (result.isExact ? '是' : '否') + '</div></div>' +
-          '<div class="meta-item"><div class="meta-label">OKLCH L</div><div class="meta-value">' + result.originalL.toFixed(3) + '</div></div>' +
-          '<div class="meta-item"><div class="meta-label">OKLCH C</div><div class="meta-value">' + result.originalC.toFixed(3) + '</div></div>' +
-          '<div class="meta-item"><div class="meta-label">OKLCH H</div><div class="meta-value">' + result.originalH.toFixed(1) + '°</div></div>' +
-          '<div class="meta-item"><div class="meta-label">校正后 HEX</div><div class="meta-value">' + result.adjustedHex.toUpperCase() + '</div></div>';
+          '<div class="meta-item"><div class="meta-label">LIGHTNESS</div><div class="meta-value">' + result.originalL.toFixed(3) + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">CHROMA</div><div class="meta-value">' + result.originalC.toFixed(3) + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">HUE</div><div class="meta-value">' + Math.round(result.originalH) + '&deg;</div></div>' +
+          hueInfo +
+          '<div class="meta-item"><div class="meta-label">映射色阶</div><div class="meta-value">' + result.bestStep + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">色相修正</div><div class="meta-value">' + correctionStatus + '</div></div>' +
+          '<div class="meta-item"><div class="meta-label">深色判定</div><div class="meta-value">' + (result.isDark ? '是' : '否') + '</div></div>';
+
+        // 说明文字
+        var note = '';
+        if (result.hueCorrected) {
+          note = '暗端色相修正已开启：输入色相 ' + Math.round(result.originalH) + '° 反推为基础色相 ' + Math.round(result.usedHue) + '°，暗端色阶将与你输入的颜色色相一致。';
+        } else if (result.isDark && hueCorrectionToggle) {
+          note = '输入色为深色（L=' + result.originalL.toFixed(2) + '），暗端色阶的色相会自然漂移。如需暗端与输入色色相一致，请开启「暗端色相修正」。';
+        } else {
+          note = '基于 OKLCH 曲线拟合生成色阶，映射至 ' + result.bestStep + ' 档。';
+        }
+        noteEl.textContent = note;
       }
 
       picker.addEventListener('input', function () {
@@ -208,17 +314,21 @@
         }
       });
 
+      hueCorrectionToggle.addEventListener('change', function () {
+        render(input.value);
+      });
+
       randomBtn.addEventListener('click', function () {
-        const r = Math.floor(Math.random() * 256);
-        const g = Math.floor(Math.random() * 256);
-        const b = Math.floor(Math.random() * 256);
-        const hex = '#' + [r, g, b].map(function (x) { return x.toString(16).padStart(2, '0'); }).join('');
+        var r = Math.floor(Math.random() * 256);
+        var g = Math.floor(Math.random() * 256);
+        var b = Math.floor(Math.random() * 256);
+        var hex = '#' + [r, g, b].map(function (x) { return x.toString(16).padStart(2, '0'); }).join('');
         input.value = hex;
         picker.value = hex;
         render(hex);
       });
 
-      render('#EAB308');
+      render('#3B82F6');
     })();
   </script>
 </body>

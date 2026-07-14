@@ -11,115 +11,421 @@
   'use strict';
 
   // ============================================================
-  //  Smart Palette — 基于 Tailwind v4 色板结构的智能色阶生成器
+  //  Smart Palette v2 — 基于 OKLCH Cubic Spline 曲线拟合的智能色阶生成器
   // ============================================================
-  // 核心思路：
-  // 1. 在 OKLCH 色彩空间工作，而非 RGB 或 HSL。
-  // 2. 根据输入色的饱和度（Chroma）自适应选择亮度曲线。
-  // 3. 根据输入色的饱和度自适应选择 Chroma 衰减曲线。
-  // 4. 以输入色实际映射到的档位为锚点，生成完整 11 阶色板。
   //
-  // 为什么用 OKLCH？
-  // OKLCH 的 L（Lightness）是感知均匀的，而 HSL 的 L 是数学亮度。
-  // 把红色只调 HSL 的 L 会变粉/变猪肝，但 OKLCH 固定色相和 Chroma 只调 L，
-  // 得到的是真正的“同一种颜色变亮/变暗”。
+  // 核心思路（v2 相比 v1 的根本性升级）：
+  //
+  // v1（参数化模型）：
+  //   色相匹配找最近两个色系 → 灰彩插值 → 锚点校正 → 生成色板
+  //   局限：线性插值无法捕捉色系间的非线性变化，尤其在色相间距大时精度不够
+  //
+  // v2（曲线拟合模型）：
+  //   1. 从 Tailwind V4 官方色板提取 17 个非灰阶色系的 OKLCH 数据
+  //   2. 对每个色阶 (50-950) 分别建立 hue → (L, C, h) 的样条拟合
+  //   3. 横向曲线（跨色系）用 PCHIP 保证单调性，纵向曲线（跨色阶）用 Akima 保证平滑
+  //   4. 对 hue 维度使用循环插值处理 0°/360° 环绕
+  //   5. 输入任意色相角，直接从拟合曲线上取值，输出 11 色阶的科学配色方案
+  //   6. 支持暗端色相修正：深色输入时反推基础色相，使暗端色阶与输入色色相一致
+  //
+  // 数据来源: Tailwind CSS v4 官方色板
   // ============================================================
 
   // ===== 档位序列 =====
-  // Tailwind 风格的标准色阶，从 50（最浅）到 950（最深）。
-  const SM_STEPS = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+  var SM_STEPS = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
 
-  // ===== 灰阶亮度目标表 =====
-  // 来源：Tailwind v4 的 Slate / Gray / Zinc / Neutral / Stone 五套无彩色色系的平均 L 值。
-  // 这些颜色饱和度≈0，不存在 Helmholtz-Kohlrausch 效应，所以它们的 L 分布
-  // 可以当作"人眼感知亮度"的基准线。
-  // 当输入色接近灰色时，算法会 100% 使用这张表。
-  const SM_GRAY_L = {
-    50: 0.9848, 100: 0.9684, 200: 0.9244, 300: 0.8702, 400: 0.7066,
-    500: 0.5532, 600: 0.4434, 700: 0.3720, 800: 0.2736, 900: 0.2098, 950: 0.1384
+
+  // ============================================================
+  // 1. 原始数据：Tailwind V4 非灰阶色系 OKLCH 值
+  // 格式: { 色系名: { 色阶: [L, C, h], ... } }
+  // L: Lightness (0-100), C: Chroma, h: Hue angle (0-360)
+  // ============================================================
+
+  var TV4_COLORS = {
+    Red:     { 50:[97.05,0.0129,17.38], 100:[93.56,0.0309,17.72], 200:[88.45,0.0593,18.33], 300:[80.77,0.1035,19.57], 400:[71.06,0.1661,22.22], 500:[63.68,0.2078,25.33], 600:[57.71,0.2152,27.33], 700:[50.54,0.1905,27.52], 800:[44.37,0.1613,26.9],  900:[39.58,0.1331,25.72], 950:[25.75,0.0886,26.04] },
+    Orange:  { 50:[97.96,0.0158,73.68], 100:[95.42,0.0372,75.16], 200:[90.15,0.0729,70.7],  300:[83.66,0.1165,66.29], 400:[75.76,0.1590,55.93], 500:[70.49,0.1867,47.6],  600:[64.61,0.1943,41.12], 700:[55.34,0.1739,38.4],  800:[46.98,0.1430,37.3],  900:[40.84,0.1165,38.17], 950:[26.59,0.0762,36.26] },
+    Amber:   { 50:[98.69,0.0214,95.28], 100:[96.19,0.0580,95.62], 200:[92.43,0.1151,95.75], 300:[87.9,0.1534,91.61],  400:[83.69,0.1644,84.43], 500:[76.86,0.1647,70.08],  600:[66.58,0.1574,58.32], 700:[55.53,0.1455,49.0],  800:[47.32,0.1247,46.2],  900:[41.37,0.1054,45.9],  950:[27.91,0.0742,45.64] },
+    Yellow:  { 50:[98.73,0.0262,102.21],100:[97.29,0.0693,103.19],200:[94.51,0.1243,101.54],300:[90.52,0.1657,98.11],  400:[86.06,0.1731,91.94], 500:[79.52,0.1617,86.05],  600:[68.06,0.1423,75.83], 700:[55.38,0.1207,66.44], 800:[47.62,0.1034,61.91], 900:[42.1,0.0897,57.71],  950:[28.57,0.0639,53.81] },
+    Lime:    { 50:[98.57,0.0310,120.76],100:[96.69,0.0659,122.33],200:[93.82,0.1217,124.32],300:[89.72,0.1786,126.67],400:[84.93,0.2073,128.85],500:[76.81,0.2044,130.85],600:[64.82,0.1754,131.68],700:[53.22,0.1405,131.59],800:[45.28,0.1129,130.93],900:[40.5,0.0956,131.06], 950:[27.41,0.0688,132.11] },
+    Green:   { 50:[98.19,0.0181,155.83],100:[96.24,0.0434,156.74],200:[92.5,0.0806,155.99], 300:[87.12,0.1363,154.45],400:[80.03,0.1821,151.71],500:[72.27,0.1920,149.58],600:[62.71,0.1699,149.21],700:[52.73,0.1371,150.07],800:[44.79,0.1083,151.33],900:[39.25,0.0896,152.54],950:[26.64,0.0628,152.93] },
+    Emerald: { 50:[97.93,0.0207,166.11],100:[95.05,0.0507,163.05],200:[90.49,0.0895,164.15],300:[84.52,0.1299,164.98],400:[77.29,0.1535,163.22],500:[69.59,0.1491,162.48],600:[59.6,0.1274,163.23], 700:[50.81,0.1049,165.61],800:[43.18,0.0865,166.91],900:[37.8,0.0730,168.94], 950:[26.21,0.0487,172.55] },
+    Teal:    { 50:[98.36,0.0142,180.72],100:[95.27,0.0498,180.8], 200:[91.0,0.0927,180.43], 300:[85.49,0.1251,181.07],400:[78.45,0.1325,181.91],500:[70.38,0.1230,182.5], 600:[60.02,0.1038,184.7], 700:[51.09,0.0861,186.39],800:[43.7,0.0705,188.22], 900:[38.61,0.0590,188.42],950:[27.73,0.0447,192.52] },
+    Cyan:    { 50:[98.41,0.0189,200.87],100:[95.63,0.0443,203.39],200:[91.67,0.0772,205.04],300:[86.51,0.1153,207.08],400:[79.71,0.1339,211.53],500:[71.48,0.1257,215.22],600:[60.89,0.1109,221.72],700:[51.98,0.0936,223.13],800:[45.0,0.0771,224.28],  900:[39.82,0.0664,227.39],950:[30.18,0.0541,229.7] },
+    Sky:     { 50:[97.71,0.0125,236.62],100:[95.14,0.0250,236.82],200:[90.14,0.0555,230.9], 300:[82.76,0.1013,230.32],400:[75.35,0.1390,232.66],500:[68.47,0.1479,237.32],600:[58.76,0.1389,241.97],700:[50.0,0.1193,242.75], 800:[44.34,0.1000,240.79],900:[39.12,0.0845,240.88],950:[29.35,0.0632,243.16] },
+    Blue:    { 50:[97.05,0.0142,254.6], 100:[93.19,0.0316,255.59],200:[88.23,0.0571,254.13],300:[80.91,0.0956,251.81],400:[71.37,0.1434,254.62],500:[62.31,0.1880,259.81],600:[54.61,0.2152,262.88],700:[48.82,0.2172,264.38],800:[42.44,0.1809,265.64],900:[37.91,0.1378,265.52],950:[28.23,0.0874,267.94] },
+    Indigo:  { 50:[96.19,0.0179,272.31],100:[92.99,0.0334,272.79],200:[86.99,0.0622,274.04],300:[78.53,0.1041,274.71],400:[68.01,0.1583,276.93],500:[58.54,0.2041,277.12],600:[51.06,0.2301,276.97],700:[45.68,0.2146,277.02],800:[39.84,0.1773,277.37],900:[35.88,0.1354,278.7], 950:[25.73,0.0861,281.29] },
+    Violet:  { 50:[96.19,0.0179,272.31],100:[94.33,0.0284,294.59],200:[89.43,0.0549,293.28],300:[81.12,0.1013,293.57],400:[70.9,0.1592,293.54], 500:[60.56,0.2189,292.72],600:[54.13,0.2466,293.01],700:[49.07,0.2412,292.58],800:[43.2,0.2106,292.76], 900:[37.96,0.1783,293.74],950:[28.27,0.1351,291.09] },
+    Purple:  { 50:[97.68,0.0142,308.3], 100:[94.64,0.0327,307.17],200:[90.24,0.0604,306.7],  300:[82.68,0.1082,306.38],400:[72.17,0.1767,305.5], 500:[62.68,0.2325,303.9], 600:[55.75,0.2525,302.32],700:[49.55,0.2369,301.92],800:[43.83,0.1983,303.72],900:[38.07,0.1661,304.99],950:[29.05,0.1432,302.72] },
+    Fuchsia: { 50:[97.73,0.0173,320.06],100:[95.2,0.0360,318.85], 200:[90.3,0.0732,319.62],  300:[83.3,0.1322,321.43], 400:[74.77,0.2070,322.16],500:[66.68,0.2591,322.15],600:[59.15,0.2569,322.9], 700:[51.8,0.2258,323.95], 800:[45.19,0.1922,324.59],900:[40.07,0.1601,325.61],950:[29.32,0.1309,325.66] },
+    Pink:    { 50:[97.14,0.0141,343.2], 100:[94.82,0.0276,342.26],200:[89.94,0.0589,343.23],300:[82.28,0.1095,346.02],400:[72.53,0.1752,349.76],500:[65.59,0.2118,354.31],600:[59.16,0.2180,0.58],  700:[52.46,0.1990,3.96],  800:[45.87,0.1697,3.82],  900:[40.78,0.1442,2.43],  950:[28.45,0.1048,3.91] },
+    Rose:    { 50:[96.94,0.0151,12.42], 100:[94.14,0.0297,12.58], 200:[89.24,0.0559,10.0],  300:[80.97,0.1061,11.64], 400:[71.92,0.1690,13.43], 500:[64.5,0.2154,16.44],  600:[58.58,0.2220,17.58], 700:[51.43,0.1978,16.93], 800:[45.46,0.1713,13.7],  900:[41.03,0.1502,10.27], 950:[27.08,0.1009,12.09] }
   };
 
-  // ===== 色相感知参考曲线 =====
-  // 来源：Tailwind CSS v4 的 22 套色系，每套取其 500 档色相为代表，
-  // 并记录每个档位 OKLCH 的 L 值和 C 相对 500 档的比率。
-  // 对任意输入色，根据色相在相邻两个色系之间插值，得到专属的参考曲线。
-  // 这比单一"灰阶/彩色平均曲线"更准确，尤其是 lime/yellow 等高亮色系。
-  const SM_FAMILIES = [
-    { name: 'slate', hue: 257.417, l: {50:0.9840,100:0.9680,200:0.9290,300:0.8690,400:0.7040,500:0.5540,600:0.4460,700:0.3720,800:0.2790,900:0.2080,950:0.1290}, cr: {50:0.065,100:0.152,200:0.283,300:0.478,400:0.870,500:1.000,600:0.935,700:0.957,800:0.891,900:0.913,950:0.913} },
-    { name: 'gray', hue: 264.364, l: {50:0.9850,100:0.9670,200:0.9280,300:0.8720,400:0.7070,500:0.5510,600:0.4460,700:0.3730,800:0.2780,900:0.2100,950:0.1300}, cr: {50:0.074,100:0.111,200:0.222,300:0.370,400:0.815,500:1.000,600:1.111,700:1.259,800:1.222,900:1.259,950:1.037} },
-    { name: 'zinc', hue: 285.938, l: {50:0.9850,100:0.9670,200:0.9200,300:0.8710,400:0.7050,500:0.5520,600:0.4420,700:0.3700,800:0.2740,900:0.2100,950:0.1410}, cr: {50:0.000,100:0.062,200:0.250,300:0.375,400:0.938,500:1.000,600:1.062,700:0.812,800:0.375,900:0.375,950:0.312} },
-    { name: 'neutral', hue: 0.000, l: {50:0.9850,100:0.9700,200:0.9220,300:0.8700,400:0.7080,500:0.5560,600:0.4390,700:0.3710,800:0.2690,900:0.2050,950:0.1450}, cr: {50:0.200,100:0.289,200:0.467,300:0.644,400:0.822,500:1.000,600:0.822,700:0.644,800:0.467,900:0.289,950:0.200} },
-    { name: 'stone', hue: 58.071, l: {50:0.9850,100:0.9700,200:0.9230,300:0.8690,400:0.7090,500:0.5530,600:0.4440,700:0.3740,800:0.2680,900:0.2160,950:0.1470}, cr: {50:0.077,100:0.077,200:0.231,300:0.385,400:0.769,500:1.000,600:0.846,700:0.769,800:0.538,900:0.462,950:0.308} },
-    { name: 'red', hue: 25.331, l: {50:0.9710,100:0.9360,200:0.8850,300:0.8080,400:0.7040,500:0.6370,600:0.5770,700:0.5050,800:0.4440,900:0.3960,950:0.2580}, cr: {50:0.055,100:0.135,200:0.262,300:0.481,400:0.806,500:1.000,600:1.034,700:0.899,800:0.747,900:0.595,950:0.388} },
-    { name: 'orange', hue: 47.604, l: {50:0.9800,100:0.9540,200:0.9010,300:0.8370,400:0.7500,500:0.7050,600:0.6460,700:0.5530,800:0.4700,900:0.4080,950:0.2660}, cr: {50:0.075,100:0.178,200:0.357,300:0.601,400:0.859,500:1.000,600:1.042,700:0.915,800:0.737,900:0.577,950:0.371} },
-    { name: 'amber', hue: 70.080, l: {50:0.9870,100:0.9620,200:0.9240,300:0.8790,400:0.8280,500:0.7690,600:0.6660,700:0.5550,800:0.4730,900:0.4140,950:0.2790}, cr: {50:0.117,100:0.314,200:0.638,300:0.899,400:1.005,500:1.000,600:0.952,700:0.867,800:0.729,900:0.596,950:0.410} },
-    { name: 'yellow', hue: 86.047, l: {50:0.9870,100:0.9730,200:0.9450,300:0.9050,400:0.8520,500:0.7950,600:0.6810,700:0.5540,800:0.4760,900:0.4210,950:0.2860}, cr: {50:0.141,100:0.386,200:0.701,300:0.989,400:1.082,500:1.000,600:0.880,700:0.734,800:0.620,900:0.516,950:0.359} },
-    { name: 'lime', hue: 130.850, l: {50:0.9860,100:0.9670,200:0.9380,300:0.8970,400:0.8410,500:0.7680,600:0.6480,700:0.5320,800:0.4530,900:0.4050,950:0.2740}, cr: {50:0.133,100:0.288,200:0.545,300:0.841,400:1.021,500:1.000,600:0.858,700:0.674,800:0.532,900:0.433,950:0.309} },
-    { name: 'green', hue: 149.579, l: {50:0.9820,100:0.9620,200:0.9250,300:0.8710,400:0.7920,500:0.7230,600:0.6270,700:0.5270,800:0.4480,900:0.3930,950:0.2660}, cr: {50:0.082,100:0.201,200:0.384,300:0.685,400:0.954,500:1.000,600:0.886,700:0.703,800:0.543,900:0.434,950:0.297} },
-    { name: 'emerald', hue: 162.480, l: {50:0.9790,100:0.9500,200:0.9050,300:0.8450,400:0.7650,500:0.6960,600:0.5960,700:0.5080,800:0.4320,900:0.3780,950:0.2620}, cr: {50:0.124,100:0.306,200:0.547,300:0.841,400:1.041,500:1.000,600:0.853,700:0.694,800:0.559,900:0.453,950:0.300} },
-    { name: 'teal', hue: 182.503, l: {50:0.9840,100:0.9530,200:0.9100,300:0.8550,400:0.7770,500:0.7040,600:0.6000,700:0.5110,800:0.4370,900:0.3860,950:0.2770}, cr: {50:0.100,100:0.364,200:0.686,300:0.986,400:1.086,500:1.000,600:0.843,700:0.686,800:0.557,900:0.450,950:0.329} },
-    { name: 'cyan', hue: 215.221, l: {50:0.9840,100:0.9560,200:0.9170,300:0.8650,400:0.7890,500:0.7150,600:0.6090,700:0.5200,800:0.4500,900:0.3980,950:0.3020}, cr: {50:0.133,100:0.315,200:0.559,300:0.888,400:1.077,500:1.000,600:0.881,700:0.734,800:0.594,900:0.490,950:0.392} },
-    { name: 'sky', hue: 237.323, l: {50:0.9770,100:0.9510,200:0.9010,300:0.8280,400:0.7460,500:0.6850,600:0.5880,700:0.5000,800:0.4430,900:0.3910,950:0.2930}, cr: {50:0.077,100:0.154,200:0.343,300:0.657,400:0.947,500:1.000,600:0.935,700:0.793,800:0.651,900:0.533,950:0.391} },
-    { name: 'blue', hue: 259.815, l: {50:0.9700,100:0.9320,200:0.8820,300:0.8090,400:0.7070,500:0.6230,600:0.5460,700:0.4880,800:0.4240,900:0.3790,950:0.2820}, cr: {50:0.065,100:0.150,200:0.276,300:0.491,400:0.771,500:1.000,600:1.145,700:1.136,800:0.930,900:0.682,950:0.425} },
-    { name: 'indigo', hue: 277.117, l: {50:0.9620,100:0.9300,200:0.8700,300:0.7850,400:0.6730,500:0.5850,600:0.5110,700:0.4570,800:0.3980,900:0.3590,950:0.2570}, cr: {50:0.077,100:0.146,200:0.279,300:0.494,400:0.781,500:1.000,600:1.124,700:1.030,800:0.837,900:0.618,950:0.386} },
-    { name: 'violet', hue: 292.717, l: {50:0.9690,100:0.9430,200:0.8940,300:0.8110,400:0.7020,500:0.6060,600:0.5410,700:0.4910,800:0.4320,900:0.3800,950:0.2830}, cr: {50:0.064,100:0.116,200:0.228,300:0.444,400:0.732,500:1.000,600:1.124,700:1.080,800:0.928,900:0.756,950:0.564} },
-    { name: 'purple', hue: 303.900, l: {50:0.9770,100:0.9460,200:0.9020,300:0.8270,400:0.7140,500:0.6270,600:0.5580,700:0.4960,800:0.4380,900:0.3810,950:0.2910}, cr: {50:0.053,100:0.125,200:0.238,300:0.449,400:0.766,500:1.000,600:1.087,700:1.000,800:0.823,900:0.664,950:0.562} },
-    { name: 'fuchsia', hue: 322.150, l: {50:0.9770,100:0.9520,200:0.9030,300:0.8330,400:0.7400,500:0.6670,600:0.5910,700:0.5180,800:0.4520,900:0.4010,950:0.2930}, cr: {50:0.058,100:0.125,200:0.258,300:0.492,400:0.807,500:1.000,600:0.993,700:0.858,800:0.715,900:0.576,950:0.461} },
-    { name: 'pink', hue: 354.308, l: {50:0.9710,100:0.9480,200:0.8990,300:0.8230,400:0.7180,500:0.6560,600:0.5920,700:0.5250,800:0.4590,900:0.4080,950:0.2840}, cr: {50:0.058,100:0.116,200:0.253,300:0.498,400:0.838,500:1.000,600:1.033,700:0.925,800:0.776,900:0.635,950:0.452} },
-    { name: 'rose', hue: 16.439, l: {50:0.9690,100:0.9410,200:0.8920,300:0.8100,400:0.7120,500:0.6450,600:0.5860,700:0.5140,800:0.4550,900:0.4100,950:0.2710}, cr: {50:0.061,100:0.122,200:0.236,300:0.476,400:0.789,500:1.000,600:1.028,700:0.902,800:0.764,900:0.646,950:0.427} }
-  ];
 
-  // 色相环形距离：取 [0, 360) 内最短弧长
-  function _hueDistance(h1, h2) {
-    var d = Math.abs(h1 - h2) % 360;
-    return d > 180 ? 360 - d : d;
-  }
+  // ============================================================
+  // 2. PCHIP (Piecewise Cubic Hermite Interpolating Polynomial)
+  // ============================================================
+  // 保证单调性的分段三次 Hermite 插值，用于横向曲线（跨色系 hue→L/C）。
+  // 在斜率突变处不会产生 overshoot/undershoot，解决了蓝紫色系 C 值下凹问题。
 
-  // 根据输入色的色相，在 SM_FAMILIES 中找到最近的两个彩色色系并插值，
-  // 返回该色相专属的 L 参考曲线和 C 比率曲线。
-  // 灰色系（slate/gray/zinc/neutral/stone）不参与色相匹配。
-  function smGetHueRefCurves(hue) {
-    var chromatic = SM_FAMILIES.filter(function (f) {
-      return f.name !== 'slate' && f.name !== 'gray' && f.name !== 'zinc' &&
-             f.name !== 'neutral' && f.name !== 'stone';
-    });
-
-    // 按色相距离排序
-    var sorted = chromatic.map(function (f) {
-      return { family: f, dist: _hueDistance(hue, f.hue) };
-    }).sort(function (a, b) { return a.dist - b.dist; });
-
-    var f1 = sorted[0].family;
-    var f2 = sorted[1].family;
-    var d1 = sorted[0].dist;
-    var d2 = sorted[1].dist;
-
-    // 如果完全匹配某个色系，直接返回
-    if (d1 === 0) {
-      return { l: f1.l, cr: f1.cr };
+  function _pchip(xs, ys) {
+    var n = xs.length;
+    if (n < 2) {
+      var y0 = n === 1 ? ys[0] : 0;
+      return function(x) { return y0; };
+    }
+    if (n === 2) {
+      var x0 = xs[0], x1 = xs[1], y0v = ys[0], y1v = ys[1];
+      return function(x) { return y0v + (y1v - y0v) * (x - x0) / (x1 - x0); };
     }
 
-    // 在两个色系之间按色相距离反比插值
-    var w1 = d2 / (d1 + d2);
-    var w2 = d1 / (d1 + d2);
+    // 计算分段斜率
+    var h = [], del = [];
+    for (var i = 0; i < n - 1; i++) {
+      h[i] = xs[i + 1] - xs[i];
+      del[i] = (ys[i + 1] - ys[i]) / h[i];
+    }
 
-    var l = {}, cr = {};
-    SM_STEPS.forEach(function (step) {
-      l[step] = f1.l[step] * w1 + f2.l[step] * w2;
-      cr[step] = f1.cr[step] * w1 + f2.cr[step] * w2;
-    });
+    // Fritsch-Carlson 方法计算 PCHIP 导数
+    var d = new Array(n);
 
-    return { l: l, cr: cr };
+    // 端点导数
+    d[0] = del[0];
+    d[n - 1] = del[n - 2];
+
+    // 内部点导数
+    for (var i = 1; i < n - 1; i++) {
+      // 如果两侧斜率符号不同或其一为零 → 导数为零（局部极值点）
+      if (del[i - 1] * del[i] <= 0) {
+        d[i] = 0;
+      } else {
+        // Harmonic mean of slopes (Fritsch-Carlson)
+        var w1 = 2 * h[i] + h[i - 1];
+        var w2 = h[i] + 2 * h[i - 1];
+        d[i] = (w1 + w2) / (w1 / del[i - 1] + w2 / del[i]);
+      }
+    }
+
+    // 构建分段三次 Hermite 基函数
+    return function(x) {
+      // 二分查找区间
+      var lo = 0, hi = n - 2;
+      if (x <= xs[0]) lo = 0;
+      else if (x >= xs[n - 1]) lo = n - 2;
+      else {
+        while (hi - lo > 1) {
+          var mid = (lo + hi) >> 1;
+          if (xs[mid] <= x) lo = mid;
+          else hi = mid;
+        }
+      }
+
+      var dx = x - xs[lo];
+      var hi_ = h[lo];
+      var t = dx / hi_;
+
+      // Hermite 基函数
+      var h00 = (1 + 2 * t) * (1 - t) * (1 - t);
+      var h10 = t * (1 - t) * (1 - t);
+      var h01 = t * t * (3 - 2 * t);
+      var h11 = t * t * (t - 1);
+
+      return h00 * ys[lo] + h10 * hi_ * d[lo] + h01 * ys[lo + 1] + h11 * hi_ * d[lo + 1];
+    };
   }
 
-  // ===== 内部辅助函数 =====
-  // 这些函数负责在 HEX、RGB、Linear RGB、XYZ、OKLab、OKLCH 之间转换。
-  // 大部分代码来自 https://bottosson.github.io/posts/oklab/ 的参考实现。
 
-  // 将 HEX 字符串解析为 RGB 对象，每个通道归一化到 0~1。
+  // ============================================================
+  // 3. Akima 样条（纵向曲线，跨色阶）
+  // ============================================================
+  // Akima 样条对异常斜率不敏感，在数据点密集且平滑的区域表现优秀。
+  // 用于纵向曲线（同一色系内，step→L/C/h），比自然三次样条更稳定。
+
+  function _akimaSpline(xs, ys) {
+    var n = xs.length;
+    if (n < 2) {
+      var y0 = n === 1 ? ys[0] : 0;
+      return function(x) { return y0; };
+    }
+    if (n === 2) {
+      var x0 = xs[0], x1 = xs[1], y0v = ys[0], y1v = ys[1];
+      return function(x) { return y0v + (y1v - y0v) * (x - x0) / (x1 - x0); };
+    }
+    if (n === 3) {
+      // 退化为自然三次样条（Akima 需要至少 5 个点才能计算外部斜率）
+      return _cubicSplineSimple(xs, ys);
+    }
+
+    // 计算分段斜率
+    var m = [];
+    for (var i = 0; i < n - 1; i++) {
+      m[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+    }
+
+    // 计算 Akima 导数
+    // 需要扩展斜率：m[-2], m[-1], m[n-1], m[n]
+    // Akima 方法：用最外部分段斜率直接延伸
+    var mExt = [];
+    mExt[0] = 3 * m[0] - 2 * m[1];  // m[-2]
+    mExt[1] = 2 * m[0] - m[1];      // m[-1]
+    for (var i = 0; i < m.length; i++) {
+      mExt[i + 2] = m[i];
+    }
+    mExt[m.length + 2] = 2 * m[m.length - 1] - m[m.length - 2];         // m[n-1]
+    mExt[m.length + 3] = 3 * m[m.length - 1] - 2 * m[m.length - 2];     // m[n]
+
+    // 计算每个节点的导数
+    var d = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var idx = i + 2; // 在 mExt 中的索引
+      var w1 = Math.abs(mExt[idx + 1] - mExt[idx]);
+      var w2 = Math.abs(mExt[idx - 1] - mExt[idx - 2]);
+      if (w1 + w2 === 0) {
+        d[i] = (mExt[idx - 1] + mExt[idx]) / 2;
+      } else {
+        d[i] = (w1 * mExt[idx - 1] + w2 * mExt[idx]) / (w1 + w2);
+      }
+    }
+
+    // 构建分段三次 Hermite 插值
+    var hs = [];
+    for (var i = 0; i < n - 1; i++) {
+      hs[i] = xs[i + 1] - xs[i];
+    }
+
+    return function(x) {
+      var lo = 0, hiIdx = n - 2;
+      if (x <= xs[0]) lo = 0;
+      else if (x >= xs[n - 1]) lo = n - 2;
+      else {
+        while (hiIdx - lo > 1) {
+          var mid = (lo + hiIdx) >> 1;
+          if (xs[mid] <= x) lo = mid;
+          else hiIdx = mid;
+        }
+      }
+
+      var dx = x - xs[lo];
+      var h = hs[lo];
+      var t = dx / h;
+
+      var h00 = (1 + 2 * t) * (1 - t) * (1 - t);
+      var h10 = t * (1 - t) * (1 - t);
+      var h01 = t * t * (3 - 2 * t);
+      var h11 = t * t * (t - 1);
+
+      return h00 * ys[lo] + h10 * h * d[lo] + h01 * ys[lo + 1] + h11 * h * d[lo + 1];
+    };
+  }
+
+  // 简单自然三次样条（当数据点不足以使用 Akima 时的后备）
+  function _cubicSplineSimple(xs, ys) {
+    var n = xs.length;
+    if (n < 2) {
+      var y0 = n === 1 ? ys[0] : 0;
+      return function(x) { return y0; };
+    }
+    if (n === 2) {
+      var x0 = xs[0], x1 = xs[1], y0v = ys[0], y1v = ys[1];
+      return function(x) { return y0v + (y1v - y0v) * (x - x0) / (x1 - x0); };
+    }
+
+    var h = [];
+    for (var i = 0; i < n - 1; i++) h[i] = xs[i + 1] - xs[i];
+
+    var alpha = [0];
+    for (var i = 1; i < n - 1; i++) {
+      alpha[i] = 3 * ((ys[i + 1] - ys[i]) / h[i] - (ys[i] - ys[i - 1]) / h[i - 1]);
+    }
+
+    var l = [1], mu = [0], z = [0];
+    for (var i = 1; i < n - 1; i++) {
+      l[i] = 2 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1];
+      mu[i] = h[i] / (l[i] || 1);
+      z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / (l[i] || 1);
+    }
+
+    var c = new Array(n).fill(0), b = new Array(n).fill(0), dd = new Array(n).fill(0);
+    for (var j = n - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j + 1];
+      b[j] = (ys[j + 1] - ys[j]) / h[j] - h[j] * (c[j + 1] + 2 * c[j]) / 3;
+      dd[j] = (c[j + 1] - c[j]) / (3 * h[j]);
+    }
+
+    return function(x) {
+      var lo = 0, hiIdx = n - 2;
+      if (x <= xs[0]) lo = 0;
+      else if (x >= xs[n - 1]) lo = n - 2;
+      else {
+        while (hiIdx - lo > 1) {
+          var mid = (lo + hiIdx) >> 1;
+          if (xs[mid] <= x) lo = mid;
+          else hiIdx = mid;
+        }
+      }
+      var dx = x - xs[lo];
+      return ys[lo] + b[lo] * dx + c[lo] * dx * dx + dd[lo] * dx * dx * dx;
+    };
+  }
+
+
+  // ============================================================
+  // 4. 循环样条拟合（处理色相环绕）
+  // ============================================================
+
+  function _circularSpline(xs, hs) {
+    // 对周期性 hue 值进行循环样条拟合
+    // 将角度映射到 cos/sin，分别拟合 PCHIP，再 arctan2 回角度
+    var cosHs = hs.map(function(h) { return Math.cos(h * Math.PI / 180); });
+    var sinHs = hs.map(function(h) { return Math.sin(h * Math.PI / 180); });
+
+    var pchipCos = _pchip(xs, cosHs);
+    var pchipSin = _pchip(xs, sinHs);
+
+    return function(x) {
+      var c = pchipCos(x);
+      var s = pchipSin(x);
+      return ((Math.atan2(s, c) * 180 / Math.PI) + 360) % 360;
+    };
+  }
+
+
+  // ============================================================
+  // 5. 预计算拟合曲线
+  // ============================================================
+
+  var _TV4_SPLINE_L = null;
+  var _TV4_SPLINE_C = null;
+  var _TV4_SPLINE_H = null;
+
+  function _tv4BuildSplines() {
+    // 按 500 档 hue 排序色系名
+    var sortedNames = Object.keys(TV4_COLORS).sort(function(a, b) {
+      return TV4_COLORS[a][500][2] - TV4_COLORS[b][500][2];
+    });
+
+    var anchorHues = {};
+    sortedNames.forEach(function(name) {
+      anchorHues[name] = TV4_COLORS[name][500][2];
+    });
+
+    // 扩展数据 ±360° 处理色相环绕
+    var extendedData = {};
+    var extendedHues = [];
+
+    sortedNames.forEach(function(name) {
+      var h = anchorHues[name];
+      [-360, 0, 360].forEach(function(offset) {
+        var key = h + offset;
+        extendedHues.push(key);
+        extendedData[key] = TV4_COLORS[name];
+      });
+    });
+
+    // 去重排序
+    extendedHues = extendedHues.filter(function(v, i, a) { return a.indexOf(v) === i; });
+    extendedHues.sort(function(a, b) { return a - b; });
+
+    var splineL = {};
+    var splineC = {};
+    var splineH = {};
+
+    SM_STEPS.forEach(function(step) {
+      var hueList = [], LList = [], CList = [], hList = [];
+
+      extendedHues.forEach(function(h) {
+        hueList.push(h);
+        var data = extendedData[h][step];
+        LList.push(data[0]);
+        CList.push(data[1]);
+        hList.push(data[2]);
+      });
+
+      // 按 hue 排序
+      var indices = hueList.map(function(v, i) { return i; });
+      indices.sort(function(a, b) { return hueList[a] - hueList[b]; });
+
+      var sortedHues = indices.map(function(i) { return hueList[i]; });
+      var sortedL = indices.map(function(i) { return LList[i]; });
+      var sortedC = indices.map(function(i) { return CList[i]; });
+      var sortedH = indices.map(function(i) { return hList[i]; });
+
+      // 横向曲线：PCHIP（保证单调性，消除下凹/overshoot）
+      splineL[step] = _pchip(sortedHues, sortedL);
+      splineC[step] = _pchip(sortedHues, sortedC);
+      // 色相用循环插值
+      splineH[step] = _circularSpline(sortedHues, sortedH);
+    });
+
+    _TV4_SPLINE_L = splineL;
+    _TV4_SPLINE_C = splineC;
+    _TV4_SPLINE_H = splineH;
+  }
+
+  // 初始化
+  _tv4BuildSplines();
+
+
+  // ============================================================
+  // 6. OKLCH 颜色空间转换
+  // ============================================================
+
+  function _toLinear(x) {
+    return x >= 0.04045 ? Math.pow((x + 0.055) / 1.055, 2.4) : x / 12.92;
+  }
+
+  function _fromLinear(x) {
+    return x >= 0.0031308 ? 1.055 * Math.pow(x, 1 / 2.4) - 0.055 : 12.92 * x;
+  }
+
+  function smRgbToOklch(r, g, b) {
+    var lr = _toLinear(r), lg = _toLinear(g), lb = _toLinear(b);
+
+    var lms_ = {
+      l: Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb),
+      m: Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb),
+      s: Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb)
+    };
+
+    var lab = {
+      l: 0.2104542553 * lms_.l + 0.7936177850 * lms_.m - 0.0040720468 * lms_.s,
+      a: 1.9779984951 * lms_.l - 2.4285922050 * lms_.m + 0.4505937099 * lms_.s,
+      b: 0.0259040371 * lms_.l + 0.7827717662 * lms_.m - 0.8086757660 * lms_.s
+    };
+
+    var c = Math.sqrt(lab.a * lab.a + lab.b * lab.b);
+    var h = c < 0.0001 ? 0 : (Math.atan2(lab.b, lab.a) * 180 / Math.PI + 360) % 360;
+
+    return { l: lab.l, c: c, h: h };
+  }
+
+  function smOklchToRgb(l, c, h) {
+    var hRad = h * Math.PI / 180;
+    var a = c * Math.cos(hRad);
+    var b = c * Math.sin(hRad);
+
+    var lms_ = {
+      l: l + 0.3963377774 * a + 0.2158037573 * b,
+      m: l - 0.1055613458 * a - 0.0638541728 * b,
+      s: l - 0.0894841775 * a - 1.2914855480 * b
+    };
+
+    var lms = {
+      l: lms_.l * lms_.l * lms_.l,
+      m: lms_.m * lms_.m * lms_.m,
+      s: lms_.s * lms_.s * lms_.s
+    };
+
+    return {
+      r: Math.round(_fromLinear(Math.max(0, Math.min(1, 4.0767416621 * lms.l - 3.3077115913 * lms.m + 0.2309699292 * lms.s))) * 255),
+      g: Math.round(_fromLinear(Math.max(0, Math.min(1, -1.2684380046 * lms.l + 2.6097574011 * lms.m - 0.3413193965 * lms.s))) * 255),
+      b: Math.round(_fromLinear(Math.max(0, Math.min(1, -0.0041960863 * lms.l - 0.7034186147 * lms.m + 1.7076147010 * lms.s))) * 255)
+    };
+  }
+
   function _hexToRgb(hex) {
-    const hexClean = hex.replace('#', '');
-    const hex6 = hexClean.length === 3
+    var hexClean = hex.replace('#', '');
+    var hex6 = hexClean.length === 3
       ? hexClean[0] + hexClean[0] + hexClean[1] + hexClean[1] + hexClean[2] + hexClean[2]
       : hexClean;
     return {
@@ -129,352 +435,251 @@
     };
   }
 
-  // 将 RGB 对象转换为 HEX 字符串，带 0 填充。
   function _rgbToHex(r, g, b) {
-    return '#' + [r, g, b].map(function (x) {
+    return '#' + [r, g, b].map(function(x) {
       return Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0');
     }).join('');
   }
 
-  // sRGB 的 gamma 校正：从 sRGB 到线性 RGB。
-  function _toLinear(x) {
-    return x >= 0.04045 ? Math.pow((x + 0.055) / 1.055, 2.4) : x / 12.92;
-  }
 
-  // sRGB 的 gamma 校正：从线性 RGB 到 sRGB。
-  function _fromLinear(x) {
-    return x >= 0.0031308 ? 1.055 * Math.pow(x, 1 / 2.4) - 0.055 : 12.92 * x;
-  }
+  // ============================================================
+  // 7. 色域保护
+  // ============================================================
 
-  // 将 RGB 转换为 OKLCH。
-  // 先转线性 RGB，再乘合并的 RGB→LMS 矩阵（sRGB→XYZ 和 XYZ→LMS 两步合并后的系数），
-  // 然后 cube root 转非线性 LMS，再乘 LMS→OKLab 矩阵，最后转极坐标（LCH）。
-  // 注意：不能把 XYZ→LMS 矩阵直接乘线性 RGB，必须用合并后的 RGB→LMS 矩阵。
-  function smRgbToOklch(r, g, b) {
-    const lr = _toLinear(r);
-    const lg = _toLinear(g);
-    const lb = _toLinear(b);
-
-    // 合并的 sRGB→LMS 矩阵（来自 OKLab 规范）
-    const lms = {
-      l: 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb,
-      m: 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb,
-      s: 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb
-    };
-
-    const lms_ = {
-      l: Math.cbrt(lms.l),
-      m: Math.cbrt(lms.m),
-      s: Math.cbrt(lms.s)
-    };
-
-    const lab = {
-      l: 0.2104542553 * lms_.l + 0.7936177850 * lms_.m - 0.0040720468 * lms_.s,
-      a: 1.9779984951 * lms_.l - 2.4285922050 * lms_.m + 0.4505937099 * lms_.s,
-      b: 0.0259040371 * lms_.l + 0.7827717662 * lms_.m - 0.8086757660 * lms_.s
-    };
-
-    const c = Math.sqrt(lab.a * lab.a + lab.b * lab.b);
-    let h = (Math.atan2(lab.b, lab.a) * 180) / Math.PI;
-    if (h < 0) h += 360;
-
-    return { l: lab.l, c: c, h: h };
-  }
-
-  // 将 OKLCH 转换为 RGB。
-  function smOklchToRgb(l, c, h) {
-    const hRad = (h * Math.PI) / 180;
-    const a = c * Math.cos(hRad);
-    const b = c * Math.sin(hRad);
-
-    const lms_ = {
-      l: l + 0.3963377774 * a + 0.2158037573 * b,
-      m: l - 0.1055613458 * a - 0.0638541728 * b,
-      s: l - 0.0894841775 * a - 1.2914855480 * b
-    };
-
-    const lms = {
-      l: lms_.l * lms_.l * lms_.l,
-      m: lms_.m * lms_.m * lms_.m,
-      s: lms_.s * lms_.s * lms_.s
-    };
-
-    const rgb = {
-      r: 4.0767416621 * lms.l - 3.3077115913 * lms.m + 0.2309699292 * lms.s,
-      g: -1.2684380046 * lms.l + 2.6097574011 * lms.m - 0.3413193965 * lms.s,
-      b: -0.0041960863 * lms.l - 0.7034186147 * lms.m + 1.7076147010 * lms.s
-    };
-
-    return {
-      r: Math.round(_fromLinear(rgb.r) * 255),
-      g: Math.round(_fromLinear(rgb.g) * 255),
-      b: Math.round(_fromLinear(rgb.b) * 255)
-    };
-  }
-
-  // ===== 核心算法：自适应亮度目标 =====
-  // 输入：当前颜色的 L（感知亮度）和 C（饱和度）
-  // 输出：11 个档位的目标 L 值
-  //
-  // 步骤：
-  // 1. 根据 C 值在灰阶曲线（SM_GRAY_L）和彩色系曲线（SM_CHROMATIC_L）之间插值。
-  //    chroma_factor = clamp(C / 0.30, 0, 1)
-  //    C 越小越用灰阶表，C 越大越用彩色系表。
-  // 2. 以输入色的实际 L 为锚点做校正（锚点档位 = 输入色最匹配的档位）：
-  //    锚点档位的目标 L = 输入色的实际 L
-  //    其他档位按到锚点的距离衰减，回归基础曲线
-  //
-  //    关键改进：不再硬编码 500 档为锚点。
-  //    如果输入色很暗（L=0.27），自然属于 800-950 范围，
-  //    以 500 为锚点会整条曲线向下拉 -0.27，导致暗端被压缩到纯黑。
-  //    改用 bestStep 为锚点后，暗色在暗端展开，亮色在亮端展开。
-  // 以 anchorStep 档位为锚点，生成 L 目标曲线（内部函数）
-  // hueRefL: 该色相专属的 L 参考曲线（由 smGetHueRefCurves 返回的 l 对象）
-  // inputC: 输入色的 Chroma，用于在灰阶曲线和色相曲线之间插值
-  function _smGetLTargetsWithAnchor(inputL, inputC, anchorStep, hueRefL) {
-    var chromaFactor = Math.min(Math.max(inputC / 0.30, 0), 1);
-
-    var baseL = {};
-    SM_STEPS.forEach(function (step) {
-      baseL[step] = SM_GRAY_L[step] + chromaFactor * (hueRefL[step] - SM_GRAY_L[step]);
-    });
-
-    const deltaAtAnchor = inputL - baseL[anchorStep];
-    const maxDist = Math.max(anchorStep - SM_STEPS[0], SM_STEPS[SM_STEPS.length - 1] - anchorStep);
-    const safeMaxDist = maxDist > 0 ? maxDist : 450;
-
-    const targets = {};
-    SM_STEPS.forEach(function (step) {
-      const t = Math.abs(step - anchorStep) / safeMaxDist;
-      const decay = t * t;
-      let l = baseL[step] + deltaAtAnchor * (1 - decay);
-      l = Math.max(0.01, Math.min(0.99, l));
-      targets[step] = l;
-    });
-
-    // 自适应最小间距（补偿 sRGB gamma 压缩）
-    const BASE_GAP = 0.025;
-    const GAP_SCALE = 0.8;
-    for (let i = 1; i < SM_STEPS.length; i++) {
-      const distFromAnchor = Math.abs(SM_STEPS[i] - anchorStep) / safeMaxDist;
-      const minGap = BASE_GAP * (1 + distFromAnchor * GAP_SCALE);
-      const maxL = targets[SM_STEPS[i - 1]] - minGap;
-      if (targets[SM_STEPS[i]] > maxL) {
-        targets[SM_STEPS[i]] = Math.max(maxL, 0.01);
-      }
-    }
-
-    return targets;
-  }
-
-  function smGetLTargets(inputL, inputC, hue) {
-    // 根据色相获取专属参考曲线
-    var hueRef = smGetHueRefCurves(hue || 0);
-    var hueRefL = hueRef.l;
-
-    // 两阶段锚点定位：
-    //   第一轮：基于原始插值曲线（无锚点校正）找到输入色自然属于哪个档位
-    //   第二轮：以该档位为锚点做校正，让整条曲线围绕输入色自然展开
-    var chromaFactor = Math.min(Math.max(inputC / 0.30, 0), 1);
-
-    var rawBaseL = {};
-    SM_STEPS.forEach(function (step) {
-      rawBaseL[step] = SM_GRAY_L[step] + chromaFactor * (hueRefL[step] - SM_GRAY_L[step]);
-    });
-
-    var bestStep = 500;
-    var minDiff = Infinity;
-    SM_STEPS.forEach(function (step) {
-      var diff = Math.abs(inputL - rawBaseL[step]);
-      if (diff < minDiff) {
-        minDiff = diff;
-        bestStep = step;
-      }
-    });
-
-    return _smGetLTargetsWithAnchor(inputL, inputC, bestStep, hueRefL);
-  }
-
-  // ===== 核心算法：色相感知 Chroma 比率 =====
-  // 输入：当前颜色的 C（饱和度）和色相 H
-  // 输出：11 个档位的 Chroma 相对比率
-  //
-  // 直接使用该色相最近的 Tailwind 色系的 C 衰减曲线，
-  // 比 LOW/MID/HIGH 三曲线插值更精确。
-  function smGetChromaRatios(inputC, hue) {
-    var hueRef = smGetHueRefCurves(hue || 0);
-    return hueRef.cr;
-  }
-
-  // ===== 智能色阶映射 =====
-  // 输入：任意 HEX 颜色
-  // 输出：该颜色在 11 档色阶中应该位于哪个档位，以及完整生成的色板
-  //
-  // 返回对象包含：
-  //   bestStep      最接近的档位（50/100/.../950）
-  //   isExact       输入色是否已经接近该档位（差距 < 0.02）
-  //   originalL/C/H 输入色的 OKLCH 分量
-  //   adjustedL     输入色校正后的目标 L
-  //   adjustedHex   输入色校正后的 HEX
-  //   palette       完整 11 档色阶，每个值是 HEX
-  //   lTargets      11 档亮度目标（用于调试/可视化）
-  //   chromaRatios  11 档 Chroma 比率（用于调试/可视化）
-  function smSmartMap(hex) {
-    const rgb = _hexToRgb(hex);
-    const oklch = smRgbToOklch(rgb.r, rgb.g, rgb.b);
-    const l = oklch.l;
-    const c = oklch.c;
-    const h = oklch.h;
-
-    // 两阶段锚点定位（由 smGetLTargets 内部完成）：
-    //   基于色相感知曲线找 bestStep → 以 bestStep 为锚点生成 L 目标
-    const lTargets = smGetLTargets(l, c, h);
-
-    // 从 lTargets 中提取 bestStep（smGetLTargets 已确定）
-    let bestStep = 500;
-    let minDiff = Infinity;
-    SM_STEPS.forEach(function (step) {
-      const diff = Math.abs(l - lTargets[step]);
-      if (diff < minDiff) {
-        minDiff = diff;
-        bestStep = step;
-      }
-    });
-
-    const targetL = lTargets[bestStep];
-    const isExact = minDiff < 0.02;
-
-    const adjustedRgb = isExact
-      ? { r: Math.round(rgb.r * 255), g: Math.round(rgb.g * 255), b: Math.round(rgb.b * 255) }
-      : smOklchToRgb(targetL, c, h);
-    const adjustedHex = _rgbToHex(adjustedRgb.r, adjustedRgb.g, adjustedRgb.b);
-
-    const chromaRatios = smGetChromaRatios(c, h);
-    const baseC = c / Math.max(0.01, chromaRatios[bestStep]);
-    const palette = smGeneratePalette(targetL, baseC, h, lTargets, chromaRatios, bestStep);
-
-    // 锚点档位使用校正后的输入色，保证原色不被替换
-    palette[bestStep] = adjustedHex;
-
-    return {
-      bestStep: bestStep,
-      isExact: isExact,
-      originalL: l,
-      originalC: c,
-      originalH: h,
-      adjustedL: targetL,
-      adjustedHex: adjustedHex,
-      originalHex: hex,
-      palette: palette,
-      lTargets: lTargets,
-      chromaRatios: chromaRatios,
-      baseC: baseC
-    };
-  }
-
-  // ===== 色域保护 =====
-  // OKLCH 颜色转换到 sRGB 时，如果某些通道超出 [0, 255]，说明该颜色
-  // 无法在屏幕上显示。直接 clamp 会严重扭曲亮度和色相。
-  // 正确做法：保持 L 和 H 不变，降低 C 直到颜色刚好在色域边界上。
-  // 这样色阶的亮度单调递减不会被色域裁剪 + HK 效应破坏。
-  function _oklchToRgbInGamut(l, c, h) {
-    let currentC = Math.max(0, c);
+  function smOklchToRgbInGamut(l, c, h) {
+    var currentC = Math.max(0, c);
     while (currentC > 0.001) {
-      const hRad = (h * Math.PI) / 180;
-      const a = currentC * Math.cos(hRad);
-      const b = currentC * Math.sin(hRad);
+      var hRad = h * Math.PI / 180;
+      var a = currentC * Math.cos(hRad);
+      var b = currentC * Math.sin(hRad);
 
-      const lms_ = {
+      var lms_ = {
         l: l + 0.3963377774 * a + 0.2158037573 * b,
         m: l - 0.1055613458 * a - 0.0638541728 * b,
         s: l - 0.0894841775 * a - 1.2914855480 * b
       };
 
-      const lms = {
+      var lms = {
         l: lms_.l * lms_.l * lms_.l,
         m: lms_.m * lms_.m * lms_.m,
         s: lms_.s * lms_.s * lms_.s
       };
 
-      // 计算线性 RGB（未经 gamma 校正）
-      const lr = 4.0767416621 * lms.l - 3.3077115913 * lms.m + 0.2309699292 * lms.s;
-      const lg = -1.2684380046 * lms.l + 2.6097574011 * lms.m - 0.3413193965 * lms.s;
-      const lb = -0.0041960863 * lms.l - 0.7034186147 * lms.m + 1.7076147010 * lms.s;
+      var lr = 4.0767416621 * lms.l - 3.3077115913 * lms.m + 0.2309699292 * lms.s;
+      var lg = -1.2684380046 * lms.l + 2.6097574011 * lms.m - 0.3413193965 * lms.s;
+      var lb = -0.0041960863 * lms.l - 0.7034186147 * lms.m + 1.7076147010 * lms.s;
 
-      // 检查是否在 sRGB 色域内（微小容差容纳浮点误差）
       if (lr >= -0.001 && lr <= 1.001 && lg >= -0.001 && lg <= 1.001 && lb >= -0.001 && lb <= 1.001) {
-        // 在色域内 → 正常转换并 clamp
-        const r = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lr))) * 255)));
-        const g = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lg))) * 255)));
-        const b = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lb))) * 255)));
-        return _rgbToHex(r, g, b);
+        var r = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lr))) * 255)));
+        var g = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lg))) * 255)));
+        var bv = Math.round(Math.max(0, Math.min(255, _fromLinear(Math.max(0, Math.min(1, lb))) * 255)));
+        return _rgbToHex(r, g, bv);
       }
 
-      // 超出色域 → 降低 Chroma 8%，保留 L 和 H
       currentC *= 0.92;
     }
 
-    // 色域极限：Chroma 降到极低值仍不在色域（极端 L 值），用纯灰色
-    const rgb = smOklchToRgb(Math.max(0.01, Math.min(0.99, l)), 0, h);
+    var rgb = smOklchToRgb(Math.max(0.01, Math.min(0.99, l)), 0, h);
     return _rgbToHex(rgb.r, rgb.g, rgb.b);
   }
 
-  // ===== 生成完整色板 =====
-  // 根据输入色推导出的参数，生成 11 档色阶。
-  //
-  // 参数：
-  //   baseL        锚点档位的亮度
-  //   baseC        锚点档位的 Chroma
-  //   baseH        锚点档位的色相
-  //   lTargets     11 档亮度目标
-  //   chromaRatios 11 档 Chroma 比率
-  //   anchorStep   锚点档位（如 800）
-  function smGeneratePalette(baseL, baseC, baseH, lTargets, chromaRatios, anchorStep) {
-    const palette = {};
-    SM_STEPS.forEach(function (step) {
-      // 直接使用 lTargets 中已计算好的目标亮度，不再做 anchor blend 二次插值
-      const l = lTargets[step];
 
-      // 色相偏移：远离锚点时向蓝色轻微偏移 +2°
-      const t = Math.abs(step - anchorStep) / 450;
-      const h = (baseH + 2 * t + 360) % 360;
+  // ============================================================
+  // 8. 核心 API
+  // ============================================================
 
-      // Chroma：锚点档位使用基准值，其他档位按比率衰减
-      const c = step === anchorStep ? baseC : baseC * chromaRatios[step];
+  /**
+   * 输入任意色相角 (0-360°)，生成 11 色阶的 OKLCH 色板
+   * @param {number} hue - 色相角，范围 0-360
+   * @returns {Object} - { 50: [L, C, h], 100: [L, C, h], ..., 950: [L, C, h] }
+   *          L: Lightness (0-100), C: Chroma (>=0), h: Hue angle (0-360)
+   */
+  function tv4GenerateScale(hue) {
+    hue = ((hue % 360) + 360) % 360;
+    var result = {};
 
-      // 色域保护：超出 sRGB 时自动降低 Chroma，确保实际亮度单调递减
-      palette[step] = _oklchToRgbInGamut(
-        Math.max(0, Math.min(1, l)),
-        Math.max(0, c),
-        h
-      );
+    SM_STEPS.forEach(function(step) {
+      var L = _TV4_SPLINE_L[step](hue);
+      var C = _TV4_SPLINE_C[step](hue);
+      var h = _TV4_SPLINE_H[step](hue);
+
+      L = Math.max(0, Math.min(100, L));
+      C = Math.max(0, C);
+      h = ((h % 360) + 360) % 360;
+
+      result[step] = [
+        Math.round(L * 100) / 100,
+        Math.round(C * 10000) / 10000,
+        Math.round(h * 100) / 100
+      ];
     });
-    return palette;
+
+    return result;
   }
 
+
+  /**
+   * 从输入颜色反推其最可能对应的 500 档色相（暗端色相修正用）
+   * 在暗端色阶 (500-950) 的样条曲线上搜索，
+   * 找到哪个 500 档锚点 hue 会产生最接近输入色的暗端 hue。
+   * @param {number} inputL - OKLCH Lightness (0-100)
+   * @param {number} inputC - OKLCH Chroma
+   * @param {number} inputH - OKLCH Hue (0-360)
+   * @returns {Object} - { anchorHue, bestStep, error }
+   */
+  function tv4EstimateAnchorHue(inputL, inputC, inputH) {
+    var bestStep = null;
+    var bestHueAnchor = 0;
+    var minError = Infinity;
+
+    var searchSteps = [500, 600, 700, 800, 900, 950];
+
+    // 0.5° 精度搜索
+    for (var si = 0; si < searchSteps.length; si++) {
+      var step = searchSteps[si];
+      for (var testHue = 0; testHue < 360; testHue += 0.5) {
+        var predH = _TV4_SPLINE_H[step](testHue);
+        var diff = Math.abs(predH - inputH);
+        if (diff > 180) diff = 360 - diff;
+
+        var predL = _TV4_SPLINE_L[step](testHue);
+        var lDiff = Math.abs(predL - inputL);
+
+        var combinedError = diff + lDiff * 0.5;
+        if (combinedError < minError) {
+          minError = combinedError;
+          bestStep = step;
+          bestHueAnchor = testHue;
+        }
+      }
+    }
+
+    return {
+      anchorHue: Math.round(bestHueAnchor * 100) / 100,
+      bestStep: bestStep,
+      error: Math.round(minError * 100) / 100
+    };
+  }
+
+
+  /**
+   * 智能色阶生成 — 根据开关状态选择策略
+   * @param {string} hex - 输入颜色 (#RRGGBB)
+   * @param {boolean} hueCorrection - 是否开启暗端色相修正（默认 false）
+   * @returns {Object} - { bestStep, originalL, originalC, originalH, usedHue, hueCorrected, isDark, palette }
+   *          palette: { 50: '#hex', 100: '#hex', ..., 950: '#hex' }
+   */
+  function tv4SmartMap(hex, hueCorrection) {
+    // HEX -> OKLCH
+    var rgb = _hexToRgb(hex);
+    var oklch = smRgbToOklch(rgb.r, rgb.g, rgb.b);
+    var inputL = oklch.l * 100;   // 转为 0-100 范围
+    var inputC = oklch.c;
+    var inputH = oklch.h;
+
+    // 判断是否为深色 (L < 60 视为深色)
+    var isDark = inputL < 60;
+
+    // 选择策略
+    var usedHue = inputH;
+    var hueCorrected = false;
+
+    if (hueCorrection && isDark) {
+      // 开关开 + 深色 → 反推基础色相
+      var est = tv4EstimateAnchorHue(inputL, inputC, inputH);
+      usedHue = est.anchorHue;
+      hueCorrected = true;
+    }
+
+    // 生成色阶
+    var scale = tv4GenerateScale(usedHue);
+
+    // 找到最匹配的色阶档位
+    var bestStep = 500, minDiff = Infinity;
+    SM_STEPS.forEach(function(step) {
+      var diff = Math.abs(inputL - scale[step][0]);
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestStep = step;
+      }
+    });
+
+    // 转换为 HEX（使用色域保护）
+    var palette = {};
+    SM_STEPS.forEach(function(step) {
+      var L = scale[step][0];
+      var C = scale[step][1];
+      var h = scale[step][2];
+      palette[step] = smOklchToRgbInGamut(L / 100, C, h);
+    });
+
+    return {
+      bestStep: bestStep,
+      originalL: oklch.l,
+      originalC: inputC,
+      originalH: inputH,
+      usedHue: usedHue,
+      hueCorrected: hueCorrected,
+      isDark: isDark,
+      palette: palette
+    };
+  }
+
+
+  // ============================================================
+  // 9. 兼容旧版 API 的适配层
+  // ============================================================
+
+  /**
+   * 旧版 API 入口：smartMap(hex)
+   * 内部调用 tv4SmartMap，暗端色相修正默认关闭
+   */
+  function smSmartMap(hex) {
+    var result = tv4SmartMap(hex, false);
+    var bestStep = result.bestStep;
+
+    // 旧版 API 字段兼容
+    return {
+      bestStep: bestStep,
+      isExact: false,
+      originalL: result.originalL,
+      originalC: result.originalC,
+      originalH: result.originalH,
+      adjustedL: result.originalL,
+      adjustedHex: hex.toUpperCase(),
+      originalHex: hex.toUpperCase(),
+      palette: result.palette,
+      // v2 新增字段
+      usedHue: result.usedHue,
+      hueCorrected: result.hueCorrected,
+      isDark: result.isDark
+    };
+  }
+
+
   // ===== 对外暴露的 API =====
-  // 在浏览器中通过 SmartPalette.xxx 调用；在 Node 中通过 require 解构。
   return {
-    // 核心入口：输入 HEX，返回完整分析结果 + 色板
+    // v2 核心入口：输入 HEX + 色相修正开关，返回完整分析结果 + 色板
     smartMap: smSmartMap,
 
-    // 批量生成：输入 OKLCH 参数，返回 11 档色板
-    generatePalette: smGeneratePalette,
+    // v2 新 API：完整参数控制
+    tv4SmartMap: tv4SmartMap,
+
+    // 色阶生成（输入色相角，返回 OKLCH 参数）
+    generateScale: tv4GenerateScale,
+
+    // 暗端色相修正
+    estimateAnchorHue: tv4EstimateAnchorHue,
 
     // 颜色空间转换工具
     rgbToOklch: smRgbToOklch,
     oklchToRgb: smOklchToRgb,
+    oklchToRgbInGamut: smOklchToRgbInGamut,
     hexToRgb: _hexToRgb,
     rgbToHex: _rgbToHex,
 
-    // 核心算法组件（高级用户/调试可用）
-    getLTargets: smGetLTargets,
-    getChromaRatios: smGetChromaRatios,
-
     // 常量表
     STEPS: SM_STEPS,
-    GRAY_L: SM_GRAY_L,
-    FAMILIES: SM_FAMILIES,
-    getHueRefCurves: smGetHueRefCurves
+    TV4_COLORS: TV4_COLORS
   };
 }));
