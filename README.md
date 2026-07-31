@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: 'de9fbb9a-19a3-4fe2-952f-2e227d7ec406'
-  PropagateID: 'de9fbb9a-19a3-4fe2-952f-2e227d7ec406'
-  ReservedCode1: '55d75ca2-cac6-4f8f-860b-5404eb644593'
-  ReservedCode2: '55d75ca2-cac6-4f8f-860b-5404eb644593'
----
-
 # Smart Palette
 
 An intelligent color scale generator that uses **OKLCH Cubic Spline** curve fitting to produce perceptually uniform 11-step palettes (50–950) from any input color, anchored on Tailwind CSS v4's color data.
@@ -183,5 +172,3 @@ Final design: **PCHIP horizontal, Akima vertical**.
 ## License
 
 MIT
-
-> AI生成
