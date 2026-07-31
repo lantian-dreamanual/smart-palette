@@ -3,227 +3,185 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'ef597c7f-44d0-46ff-a9af-92525cb284bd'
-  PropagateID: 'ef597c7f-44d0-46ff-a9af-92525cb284bd'
-  ReservedCode1: '4d5f4027-362e-47b3-9a1e-5ce442f785b0'
-  ReservedCode2: '4d5f4027-362e-47b3-9a1e-5ce442f785b0'
+  ProduceID: 'de9fbb9a-19a3-4fe2-952f-2e227d7ec406'
+  PropagateID: 'de9fbb9a-19a3-4fe2-952f-2e227d7ec406'
+  ReservedCode1: '55d75ca2-cac6-4f8f-860b-5404eb644593'
+  ReservedCode2: '55d75ca2-cac6-4f8f-860b-5404eb644593'
 ---
 
-# Smart Palette v2
+# Smart Palette
 
-基于 Tailwind v4 色板的智能色阶配色方案，采用 **OKLCH Cubic Spline 曲线拟合** 算法。
+An intelligent color scale generator that uses **OKLCH Cubic Spline** curve fitting to produce perceptually uniform 11-step palettes (50–950) from any input color, anchored on Tailwind CSS v4's color data.
 
-输入任意色相角，直接从 17 个 Tailwind V4 色系的拟合曲线上取值，生成 11 阶色板（50 ~ 950）。
+## Features
 
----
+- **OKLCH curve fitting** — PCHIP (horizontal) + Akima (vertical) spline interpolation over 17 Tailwind v4 chromatic families, ensuring monotonicity and smooth transitions
+- **Hue-aware interpolation** — Circular spline handles the 0°/360° wraparound, so palettes stay continuous across the entire hue wheel
+- **sRGB gamut protection** — When OKLCH→RGB conversion falls outside sRGB, Chroma is automatically reduced while preserving Lightness and Hue
+- **Dark-end hue correction** — Optional mode for dark inputs (L < 60): reverse-searches the spline to find the base hue whose dark-end tones match the input's perceived hue
+- **UMD module** — Works in browsers (`<script>`), Node.js (`require`), and AMD loaders — zero dependencies
 
-## v1 → v2 升级要点
+## Screenshots
 
-| | v1（参数化模型） | v2（曲线拟合模型） |
-|---|---|---|
-| **核心算法** | 色相匹配 → 灰彩插值 → 锚点校正 | PCHIP/Akima 样条拟合 → 直接取值 |
-| **数据来源** | 22 色系的 L 曲线 + C 比率曲线 | 17 色系 × 11 色阶的完整 OKLCH 数据 |
-| **横向插值** | 线性插值（最近两色系） | PCHIP（保证单调性，无下凹/overshoot） |
-| **纵向插值** | 灰彩混合 + 锚点校正 | Akima（对异常斜率不敏感） |
-| **色相环绕** | 不处理 | circularSpline（cos/sin 分量拟合） |
-| **暗端色相** | 不处理 | 支持反推基础色相的修正开关 |
-| **精度** | 平均 L 误差 0.022 | 精确复现 Tailwind 色系锚点，中间色相科学插值 |
+### Default Mode (Light Input)
 
----
+![Default Mode](screenshots/default-mode.png)
 
-## 核心原理
+Input a color via the picker or HEX field. The algorithm fits curves across 17 Tailwind color families and generates an 11-step palette. The "锚点" (anchor) badge marks the step that best matches the input's Lightness.
 
-算法在 **OKLCH** 色彩空间中工作。OKLCH 把颜色分成感知亮度（L）、色彩浓度（C）、色相（H）三个分量，其中 L 是人眼感知均匀的。
+### Hue Correction (Dark Input)
 
-### 步骤 1：提取 Tailwind V4 原始数据
+![Hue Correction](screenshots/hue-correction.png)
 
-从 Tailwind CSS v4 的 17 个非灰阶色系（Red, Orange, Amber, ..., Rose）中提取每个色阶 (50-950) 的完整 OKLCH 数据：L、C、h。每个色系有 11 个数据点，共 187 个锚点。
+When a dark color is entered (L < 60), dark-end steps naturally shift hue. Enabling "暗端色相修正" reverse-searches the spline to find the base hue that makes dark-end steps consistent with the input's perceived hue. The analysis panel shows the corrected anchor hue.
 
-### 步骤 2：构建 PCHIP 横向拟合曲线
+## Quick Start
 
-对每个色阶（如 500 档），以 17 个色系的 500 档 hue 为 X 轴、L/C/h 为 Y 轴，构建 **PCHIP（Piecewise Cubic Hermite Interpolating Polynomial）** 拟合曲线。
-
-PCHIP 的关键特性：**保证单调性**。在斜率突变处（如 Yellow → Lime 的 C 值跳变），PCHIP 不会产生 overshoot 或 undershoot，而自然三次样条在这些位置会产生严重的下凹。
-
-```
-500 档的 C 值曲线（示例）：
-
-自然三次样条：
-  Blue(0.188) → Purple(0.232) ← 此处 C 值下凹，最低可到 0.173
-
-PCHIP：
-  Blue(0.188) → Purple(0.232) ← 单调递增，无下凹
-```
-
-### 步骤 3：构建 Akima 纵向平滑曲线
-
-纵向曲线（同一色系内，step→L/C/h）使用 **Akima 样条**。Akima 对异常斜率不敏感，在数据点密集且平滑的区域表现优秀。它不会像自然三次样条那样在远处异常值的影响下产生全局振荡。
-
-### 步骤 4：循环插值处理色相环绕
-
-色相是周期性的（0° = 360°）。将色相映射到 cos/sin 分量，分别用 PCHIP 拟合，再通过 atan2 还原回角度。同时将数据扩展 ±360°，确保色相环绕处的插值连续。
-
-### 步骤 5：查询生成色板
-
-输入任意色相角 (0-360°)，在每条拟合曲线上查询对应的 L、C、h 值，即可生成 11 阶色板。
-
-### 步骤 6：暗端色相修正（可选）
-
-深色输入（L < 60）时，暗端色阶的色相会自然漂移（这是 Tailwind 色板的特性）。开启修正后，算法在暗端色阶 (500-950) 的样条曲线上搜索，反推哪个 500 档锚点色相会产生最接近输入色的暗端色相，使暗端色阶与输入色色相一致。
-
----
-
-## 完整流程图
-
-```
-输入 HEX 颜色
-  │
-  ▼
-① 转 OKLCH → L, C, H
-  │
-  ▼
-② 暗端色相修正（可选）
-  │  深色 + 开关开启 → 在暗端样条上搜索
-  │  反推基础色相 anchorHue
-  │
-  ▼
-③ 在 PCHIP/Akima 拟合曲线上查询
-  │  每个 step: splineL[hue], splineC[hue], splineH[hue]
-  │  → 得到 OKLCH 参数
-  │
-  ▼
-④ 色域保护：超出 sRGB 时自动降 C 保 L
-  │
-  ▼
-⑤ 找到最匹配的色阶档位 bestStep
-  │
-  ▼
-输出 11 档色阶 {50, 100, 200, ..., 950}
-```
-
----
-
-## 使用方法
-
-### 浏览器
+### Browser
 
 ```html
 <script src="smart-palette.js"></script>
 <script>
-  // 基本用法（暗端色相修正默认关闭）
-  const result = SmartPalette.tv4SmartMap('#3B82F6');
+  // Basic usage (hue correction off by default)
+  var result = SmartPalette.tv4SmartMap('#3B82F6');
   console.log(result.palette);
   // { 50: '#EFF6FF', 100: '#DBEAFE', ..., 950: '#172554' }
 
-  // 开启暗端色相修正
-  const result2 = SmartPalette.tv4SmartMap('#1E3A5F', true);
-  console.log(result2.hueCorrected); // true —— 色相已被修正
+  // With dark-end hue correction
+  var result2 = SmartPalette.tv4SmartMap('#1E3A5F', true);
+  console.log(result2.hueCorrected); // true
 </script>
 ```
 
 ### Node.js
 
 ```js
-const { tv4SmartMap, generateScale } = require('./smart-palette.js');
+var SmartPalette = require('./smart-palette.js');
 
-// 输入 HEX 颜色生成色板
-const result = tv4SmartMap('#3B82F6');
-console.log(result.palette[500]);   // 500 档的 HEX
-console.log(result.bestStep);        // 输入色最接近哪个档位
-console.log(result.originalL);       // 输入色的 OKLCH L 值
+// Generate palette from HEX
+var result = SmartPalette.tv4SmartMap('#3B82F6');
+console.log(result.palette[500]);
+console.log(result.bestStep);
 
-// 输入色相角生成 OKLCH 参数
-const scale = generateScale(260);    // Blue 色相
-console.log(scale[500]);             // [62.31, 0.1880, 259.81]
+// Generate OKLCH scale from hue angle
+var scale = SmartPalette.generateScale(260);
+console.log(scale[500]); // [62.31, 0.1880, 259.81]
 ```
 
-### 旧版 API 兼容
+### Legacy API
 
 ```js
-// v1 的 smartMap 接口仍然可用（内部调用 tv4SmartMap）
-const result = SmartPalette.smartMap('#3B82F6');
+// v1 smartMap interface still works (delegates to tv4SmartMap internally)
+var result = SmartPalette.smartMap('#3B82F6');
 console.log(result.palette);
 ```
 
----
-
-## API 说明
+## API
 
 ### `tv4SmartMap(hex, hueCorrection)`
 
-主入口：输入任意 HEX 颜色，返回完整分析结果。
+Main entry: input any HEX color, returns full analysis + 11-step palette.
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `hex` | String | — | 输入颜色，格式 `#RRGGBB` |
-| `hueCorrection` | Boolean | `false` | 是否开启暗端色相修正 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `hex` | String | — | Input color in `#RRGGBB` format |
+| `hueCorrection` | Boolean | `false` | Enable dark-end hue correction |
 
-返回对象：
+Returns:
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `bestStep` | Number | 输入色最接近的档位（50/100/.../950） |
-| `originalL` | Number | 输入色的 OKLCH L 值 (0-1) |
-| `originalC` | Number | 输入色的 OKLCH C 值 |
-| `originalH` | Number | 输入色的 OKLCH H 值 (0-360) |
-| `usedHue` | Number | 实际使用的色相（修正后的基础色相或原始色相） |
-| `hueCorrected` | Boolean | 是否进行了暗端色相修正 |
-| `isDark` | Boolean | 输入色是否为深色 (L < 60) |
-| `palette` | Object | 完整 11 档色阶，键为档位，值为 HEX |
+| Field | Type | Description |
+|-------|------|-------------|
+| `bestStep` | Number | Closest palette step (50/100/.../950) |
+| `originalL` | Number | OKLCH Lightness of input (0–1) |
+| `originalC` | Number | OKLCH Chroma of input |
+| `originalH` | Number | OKLCH Hue of input (0–360) |
+| `usedHue` | Number | Hue actually used (corrected or original) |
+| `hueCorrected` | Boolean | Whether dark-end hue correction was applied |
+| `isDark` | Boolean | Whether input is dark (L < 60) |
+| `palette` | Object | 11-step palette, keys are step numbers, values are HEX |
 
 ### `generateScale(hue)`
 
-输入色相角，返回 11 色阶的 OKLCH 参数（不经过色域保护）。
+Input a hue angle, returns 11-step OKLCH parameters (no gamut clipping).
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `hue` | Number | 色相角，范围 0-360 |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `hue` | Number | Hue angle, 0–360 |
 
-返回：`{ 50: [L, C, h], 100: [L, C, h], ..., 950: [L, C, h] }`（L: 0-100, C: >=0, h: 0-360）
+Returns: `{ 50: [L, C, h], ..., 950: [L, C, h] }` (L: 0–100, C: ≥0, h: 0–360)
 
 ### `estimateAnchorHue(inputL, inputC, inputH)`
 
-从输入颜色反推其最可能对应的 500 档色相（暗端色相修正用）。
+Reverse-search the spline to find which 500-step anchor hue best matches a dark input's perceived hue.
 
-返回：`{ anchorHue, bestStep, error }`
+Returns: `{ anchorHue, bestStep, error }`
 
 ### `rgbToOklch(r, g, b)` / `oklchToRgb(l, c, h)`
 
-RGB 与 OKLCH 之间的转换工具。RGB 通道归一化到 0~1。
+RGB ↔ OKLCH conversion utilities. RGB channels are normalized to 0–1.
 
 ### `oklchToRgbInGamut(l, c, h)`
 
-色域保护版本的 OKLCH→HEX 转换。超出 sRGB 色域时自动降低 Chroma 保持亮度不变。
+Gamut-protected OKLCH→HEX conversion. When outside sRGB, Chroma is automatically reduced to preserve Lightness.
 
----
+## How It Works
 
-## 插值算法对比
+### Step 1: Extract Tailwind v4 Data
 
-在 Tailwind V4 色系的横向 C 值曲线上，三种插值算法的表现：
+17 chromatic families × 11 steps = 187 OKLCH anchor points, covering Red through Rose.
 
-| 算法 | C 值 sag（下凹） | overshoot | 特点 |
-|------|-----------------|-----------|------|
-| 自然三次样条 | 0.0151（7%偏差） | 有 | 斜率突变处产生振荡 |
-| Akima | 0.0014 | 无 | 对异常斜率不敏感，但横向曲线仍有轻微下凹 |
-| **PCHIP** | **0.0000** | **0.0000** | 保证单调性，无下凹/overshoot |
+### Step 2: PCHIP Horizontal Curves
 
-最终方案：**横向用 PCHIP，纵向用 Akima**。
+For each step (e.g. 500), build a **PCHIP** spline across all 17 families' hue→L/C/h values. PCHIP guarantees monotonicity — no overshoot or undershoot at slope discontinuities (e.g. Yellow→Lime C-value jumps).
 
----
+```
+C values at step 500:
 
-## 局限性
+Natural cubic spline:  Blue(0.188) → Purple(0.232)  ← sag down to ~0.173
+PCHIP:                 Blue(0.188) → Purple(0.232)  ← monotonically increasing
+```
 
-- **0.5° 搜索精度**：暗端色相修正使用 0.5° 步进搜索，极端情况下可能有 0.25° 以内的误差。
-- **非 sRGB 色域**：OKLCH 转 RGB 时如果超出 sRGB 可显示范围，算法会自动降低 Chroma 保持亮度不变，但极端颜色仍可能有轻微失真。
-- **灰阶色系**：Slate/Gray/Zinc/Neutral/Stone 五个灰阶色系未参与拟合（C≈0），仅基于 17 个彩色色系。
+### Step 3: Akima Vertical Curves
 
----
+Within each family (step→L/C/h), **Akima** splines provide smooth vertical interpolation that is insensitive to outlier slopes.
 
-## 参考
+### Step 4: Circular Hue Interpolation
 
-- Tailwind CSS v4 官方色板：`https://tailwindcss.com/docs/colors`
-- OKLab / OKLCH 色彩空间：`https://bottosson.github.io/posts/oklab/`
-- PCHIP 算法：Fritsch & Carlson, "Monotone Piecewise Cubic Interpolation", SIAM J. Numer. Anal., 1980
-- Akima 样条：Akima, "A New Method of Interpolation and Smooth Curve Fitting Based on Local Procedures", JACM, 1970
+Hue is periodic (0° = 360°). The algorithm maps hue to cos/sin components, fits PCHIP on each, and reconstructs via atan2. Data is extended ±360° to ensure continuity at the wraparound point.
+
+### Step 5: Palette Generation
+
+Input a hue angle → query all 11 spline curves → get L/C/h per step → gamut-clip → output HEX palette.
+
+### Step 6: Dark-End Hue Correction (Optional)
+
+For dark inputs (L < 60), dark-end steps naturally drift in hue. When enabled, the algorithm searches the spline (0.5° resolution) across steps 500–950 to find the anchor hue whose dark-end predicted hue best matches the input's actual hue.
+
+## Algorithm Comparison
+
+| Algorithm | C-value sag | Overshoot | Character |
+|-----------|-------------|-----------|-----------|
+| Natural cubic | 0.0151 (7% deviation) | Yes | Oscillates at slope discontinuities |
+| Akima | 0.0014 | No | Insensitive to outlier slopes, slight horizontal sag |
+| **PCHIP** | **0.0000** | **0.0000** | Monotonicity guaranteed |
+
+Final design: **PCHIP horizontal, Akima vertical**.
+
+## Limitations
+
+- **0.5° search resolution**: Dark-end hue correction uses 0.5° steps; edge cases may have up to 0.25° error.
+- **Non-sRGB gamuts**: Colors outside sRGB are gamut-clipped by reducing Chroma; extreme colors may have slight distortion.
+- **Gray families**: Slate/Gray/Zinc/Neutral/Stone are excluded from fitting (C ≈ 0); only 17 chromatic families participate.
+
+## References
+
+- Tailwind CSS v4 colors: https://tailwindcss.com/docs/colors
+- OKLab / OKLCH color space: https://bottosson.github.io/posts/oklab/
+- PCHIP: Fritsch & Carlson, "Monotone Piecewise Cubic Interpolation", SIAM J. Numer. Anal., 1980
+- Akima spline: Akima, "A New Method of Interpolation and Smooth Curve Fitting Based on Local Procedures", JACM, 1970
+
+## License
+
+MIT
 
 > AI生成
